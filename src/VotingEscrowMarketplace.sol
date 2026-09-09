@@ -84,6 +84,19 @@ contract VotingEscrowMarketplace is ReentrancyGuard {
     event MinimumDurationUpdated(uint256 _s);
     /// @notice A payment token was either added or removed to or from the whitelist.
     event PaymentTokenValidityUpdated(address indexed _paymentToken, bool indexed _newValidity);
+    /// @notice Some or all of the fee limits and/or rates were updated.
+    event FeesConfigured(
+        uint256 _limitBlack,
+        uint256 _limitGold,
+        uint256 _limitSilver,
+        uint256 _limitBronze,
+        uint256 _limitBlue,
+        uint256 _rateBlack,
+        uint256 _rateGold,
+        uint256 _rateSilver,
+        uint256 _rateBronze,
+        uint256 _rateBlue
+    );
 
     /// @notice An order of type Listing was created by veCTM owner.
     event ListingCreated(
@@ -149,6 +162,9 @@ contract VotingEscrowMarketplace is ReentrancyGuard {
         uint256 _fee,
         uint256 _net
     );
+
+    event NFTTransferTreasuryFallback(address indexed _failedReceiver, uint256 indexed _tokenId);
+    event ETHTransferTreasuryFallback(address indexed _failedReceiver, uint256 _amount);
 
     // NOTE: I-14: Replaced grammar as suggested
     /// @notice The Fee tiers used to charge higher fees on larger locks, discouraging shill bidding.
@@ -362,6 +378,19 @@ contract VotingEscrowMarketplace is ReentrancyGuard {
             feeLimitByTier[FeeTier(i)] = _limitsCTM[i];
             feeRateByTier[FeeTier(i)] = _ratesBps[i];
         }
+        // BUG: I-22: Emit event for fee configuration
+        emit FeesConfigured(
+            _limitsCTM[0],
+            _limitsCTM[1],
+            _limitsCTM[2],
+            _limitsCTM[3],
+            _limitsCTM[4],
+            _ratesBps[0],
+            _ratesBps[1],
+            _ratesBps[2],
+            _ratesBps[3],
+            _ratesBps[4]
+        );
     }
 
     /**
@@ -446,7 +475,7 @@ contract VotingEscrowMarketplace is ReentrancyGuard {
         if (_listing.creator != _seller) revert OnlySeller();
         _deleteListingByTokenSeller(_tokenId, _seller, MarketOrderStatus.Fulfilled);
         (uint256 _lockedAmountNow, uint256 _lockedEndNow) = _snapshot(_tokenId);
-        MarketOrderStatus _status = _marketOrderStatus(_listing, _lockedAmountNow, _lockedEndNow, msg.sender, _tokenId);
+        MarketOrderStatus _status = marketOrderStatus(_listing, _lockedAmountNow, _lockedEndNow, msg.sender, _tokenId);
         // BUG: M-8: If the payment token is WETH, status cannot be PaymentApprovalRequired
         if (_status != MarketOrderStatus.Open) revert UnexpectedMarketOrderState(MarketOrderStatus.Open, _status);
         (uint256 _fee, uint256 _net) =
@@ -543,7 +572,7 @@ contract VotingEscrowMarketplace is ReentrancyGuard {
         _deleteOfferingByTokenBuyer(_tokenId, _buyer, MarketOrderStatus.Fulfilled);
         (uint256 _lockedAmountNow, uint256 _lockedEndNow) = _snapshot(_tokenId);
         MarketOrderStatus _status =
-            _marketOrderStatus(_offering, _lockedAmountNow, _lockedEndNow, _offering.creator, _tokenId);
+            marketOrderStatus(_offering, _lockedAmountNow, _lockedEndNow, _offering.creator, _tokenId);
         if (_status != MarketOrderStatus.Open) revert UnexpectedMarketOrderState(MarketOrderStatus.Open, _status);
         (uint256 _fee, uint256 _net) =
             _executeTokenSwap(_tokenId, _lockedAmountNow, _offering.paymentToken, _offering.price, _buyer, msg.sender);
@@ -615,7 +644,7 @@ contract VotingEscrowMarketplace is ReentrancyGuard {
         Auction storage _auction = auctionsByToken[_tokenId][_index];
         // BUG: H-2: Added msg.sender check to prevent unrestricted cancel of auction with index == 0
         if (msg.sender != _auction.seller) revert OnlyOwner();
-        AuctionStatus _status = _auctionStatus(_auction);
+        AuctionStatus _status = auctionStatus(_auction);
         if (_status == AuctionStatus.Pending) {
             _auction.status = AuctionStatus.Canceled;
             // BUG: C-5: Canceled auctions refund the owner the escrowed token
@@ -648,25 +677,30 @@ contract VotingEscrowMarketplace is ReentrancyGuard {
         Auction storage _auction = auctionsByToken[_tokenId][_index];
         // BUG: L-9: Added _seller check
         if (_seller != _auction.seller) revert OnlyOwner();
-        AuctionStatus _status = _auctionStatus(_auction);
+        AuctionStatus _status = auctionStatus(_auction);
         if (_status != AuctionStatus.Pending && _status != AuctionStatus.Active) {
             revert UnexpectedAuctionState(_status);
         }
         if (_price < _auction.reservePrice) {
             revert BidBelowReservePrice();
-        }
-        // BUG: L-4: Added check that the highest bid is non-zero before checking whether minimum bid increment is met
-        else if (_auction.highestBid != 0 && _price <= _auction.highestBid + _auction.minimumBidIncrement) {
+            // BUG: L-4: Added check that the highest bid is non-zero before checking whether minimum bid increment is met
+            // BUG: M-11: Modified '<=' to '<' so that highestBid + minimumBidIncrement is enough
+        } else if (_auction.highestBid != 0 && _price < _auction.highestBid + _auction.minimumBidIncrement) {
             revert BidIncrementBelowMinimum();
-        }
-        // BUG: C-4: Previous highest bid is refunded to its bidder
-        // BUG: H-5: The refund payment was moved to auctions that already have a bid
-        if (_status == AuctionStatus.Active) {
-            _transferPaymentOut(_auction.paymentToken, _auction.highestBidder, _auction.highestBid);
         }
         _auction.highestBidder = msg.sender;
         _auction.highestBid = _price;
         _auction.status = AuctionStatus.Active;
+        // BUG: I-21: Move _auction updates before refund for best CEI practices
+        {
+            address _refundee = _auction.highestBidder;
+            uint256 _refundAmount = _auction.highestBid;
+            // BUG: C-4: Previous highest bid is refunded to its bidder
+            // BUG: H-5: The refund payment was moved to auctions that already have a bid
+            if (_status == AuctionStatus.Active) {
+                _transferPaymentOut(_auction.paymentToken, _refundee, _refundAmount);
+            }
+        }
         _transferPaymentIn(_auction.paymentToken, msg.sender, _price);
         emit AuctionBid(_tokenId, _seller, msg.sender, _price);
     }
@@ -688,7 +722,7 @@ contract VotingEscrowMarketplace is ReentrancyGuard {
         Auction storage _auction = auctionsByToken[_tokenId][_index];
         // BUG: L-9: Added _seller check
         if (_seller != _auction.seller) revert OnlyOwner();
-        AuctionStatus _status = _auctionStatus(_auction);
+        AuctionStatus _status = auctionStatus(_auction);
         if (_status == AuctionStatus.Pending) {
             revert UnexpectedAuctionState(_status);
         } else if (_status == AuctionStatus.Active) {
@@ -723,10 +757,12 @@ contract VotingEscrowMarketplace is ReentrancyGuard {
      * Active: auction is marked as Active when first valid bid is made.
      * NonExistent: default status of an auction that was never actually created.
      * Pending: none of the above AND deadline not reached
-     * Expired: none of the above AND deadline reached AND highestPrice == 0
-     * Complete: none of the above AND deadline reached AND highestPrice != 0
+     * Expired: none of the above AND deadline reached AND was Pending
+     * Complete: none of the above AND deadline reached AND was Active
+     * BUG: I-19: Changed visibility from internal to public to aid off-chain integrators
+     * BUG: I-23: Updated comments' language to reflect actual check
      */
-    function _auctionStatus(Auction memory _auction) internal view returns (AuctionStatus _status) {
+    function auctionStatus(Auction memory _auction) public view returns (AuctionStatus _status) {
         _status = _auction.status;
         if (_status != AuctionStatus.Sold && _status != AuctionStatus.Canceled && _status != AuctionStatus.NonExistent)
         {
@@ -781,14 +817,15 @@ contract VotingEscrowMarketplace is ReentrancyGuard {
      *  TokenApprovalRequired: order requires the seller to approve the marketplace to transfer the veCTM.
      *  PaymentApprovalRequired: order requires the buyer to approve the marketplace to transfer the payment.
      *  KeyGenAttached: order cannot be fulfilled due to the veCTM in question being attached to a node.
+     * BUG: I-19: Changed visibility from internal to public to aid off-chain integrators
      */
-    function _marketOrderStatus(
+    function marketOrderStatus(
         MarketOrder memory _marketOrder,
         uint256 _lockedAmountNow,
         uint256 _lockedEndNow,
         address _buyer,
         uint256 _tokenId
-    ) internal view returns (MarketOrderStatus _status) {
+    ) public view returns (MarketOrderStatus _status) {
         _status = _marketOrder.status;
         // BUG: I-4: Replaced 'if' with 'else if' to enforce one status only, Expired gets priority
         if (block.timestamp >= _marketOrder.deadline) {
@@ -899,19 +936,26 @@ contract VotingEscrowMarketplace is ReentrancyGuard {
      * @param _amount The amount of ether (from msg.value) to wrap
      */
     function _wrapEtherFor(address _account, uint256 _amount) internal {
+        // BUG: I-20: Moved WETH deposit to before refund for best practice
+        address _weth = weth;
+        // BUG: C-6: Added msg object with value == _amount to WETH.deposit
+        IWETH(_weth).deposit{value: _amount}();
         // BUG: C-12: Move the msg.value checks from _transferPaymentIn to _wrapEtherFor to fix createOffering
         // NOTE: we only transfer unwrapped ether in; no wrapped ether
         if (msg.value < _amount) revert InvalidEtherAmount();
         // BUG: L-3: Changed ether transfer to call
         if (msg.value > _amount) {
-            (bool success,) = msg.sender.call{value: msg.value - _amount}("");
-            if (!success) revert EtherTransferFailed();
+            uint256 _excess = msg.value - _amount;
+            (bool success,) = msg.sender.call{value: _excess}("");
+            // BUG: M-12: Added fallback to divert excess funds to treasury in case msg.sender has receive() reversion
+            if (!success) {
+                (success,) = gov.call{value: _excess}("");
+                emit ETHTransferTreasuryFallback(msg.sender, _excess);
+            }
         }
-        address _weth = weth;
-        // BUG: C-6: Added msg object with value == _amount to WETH.deposit
-        IWETH(_weth).deposit{value: _amount}();
         if (_account != address(this)) {
-            IERC20(_weth).transfer(_account, _amount);
+            // BUG: L-12: Change from transfer to safeTransfer
+            IERC20(_weth).safeTransfer(_account, _amount);
         }
     }
 
@@ -926,7 +970,11 @@ contract VotingEscrowMarketplace is ReentrancyGuard {
         if (_account != address(this)) {
             // BUG: L-3: Changed ether transfer to call
             (bool success,) = _account.call{value: _amount}("");
-            if (!success) revert EtherTransferFailed();
+            // BUG: M-12: Added fallback to divert excess funds to treasury in case _account has receive() reversion
+            if (!success) {
+                (success,) = gov.call{value: _amount}("");
+                emit ETHTransferTreasuryFallback(_account, _amount);
+            }
         }
     }
 
@@ -962,6 +1010,8 @@ contract VotingEscrowMarketplace is ReentrancyGuard {
         address _weth = weth;
         if (_paymentToken == _weth) {
             // NOTE: we only transfer unwrapped ether out; no wrapped ether
+            // BUG: C-13: Added verification that sends to DAO in case of recipient malfeasance regarding receive().
+            // Transfer to the DAO is guaranteed to work.
             _unwrapEtherFor(_to, _amount);
         } else {
             IERC20(_paymentToken).safeTransfer(_to, _amount);
@@ -975,12 +1025,17 @@ contract VotingEscrowMarketplace is ReentrancyGuard {
      * @param _tokenId The ID of the veCTM to transfer
      */
     function _transferToken(address _from, address _to, uint256 _tokenId) internal {
-        IVotingEscrow(ve).safeTransferFrom(_from, _to, _tokenId);
+        // BUG: M-10: Added verification that sends to DAO in case of recipient malfeasance regarding
+        // onERC721Received(). Transfer to the DAO is guaranteed to work.
+        (bool success,) =
+            ve.call(abi.encodeWithSignature("safeTransferFrom(address,address,uint256)", _from, _to, _tokenId));
+        if (!success) IVotingEscrow(ve).safeTransferFrom(_from, gov, _tokenId);
     }
 
     /**
      * @notice Takes a snapshot of a veCTM token with regards to its underlying locked CTM and its unlock time.
      * @param _tokenId The ID of the veCTM token to snapshot
+     * NOTE: L-11: While the locked amount is saved as int128, it cannot be negative, nor can it be less than 1 ether.
      */
     function _snapshot(uint256 _tokenId) internal view returns (uint256, uint256) {
         (int128 _lockedAmountInt128, uint256 _lockedEnd) = IVotingEscrow(ve).locked(_tokenId);
