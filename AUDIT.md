@@ -78,6 +78,26 @@
 
 **Verdict:** All actionable audit findings are resolved or explicitly acknowledged. No new Critical/High/Medium issues found in this pass.
 
+## Summary (eighth validation — residual WETH auction / custody)
+
+| Outcome | Count |
+| ------- | ----- |
+| Prior Critical / High / Medium | still resolved or acknowledged |
+| New this sweep | 11 (C-13, M-10, M-11, M-12, L-11, L-12, I-19–I-23) |
+| Still acknowledged only | M-3, I-5, I-6, I-10, I-11, I-13 |
+
+| Finding | Resolved | Notes |
+| ------- | -------- | ----- |
+| C-13 | **no** | WETH outbid refund DoS via reverting `receive()` |
+| M-10 | **no** | No recovery if settle/cancel NFT transfer reverts or a veNFT is donated |
+| M-11 | **no** | Bid increment uses `<=` (true floor is increment + 1 wei) |
+| M-12 | **no** | Forced WETH unwrap can freeze settlement for contract sellers |
+| L-11 | **no** | `int128` lock amount cast to `uint256` without `>= 0` |
+| L-12 | **no** | `_wrapEtherFor` uses bare `IERC20.transfer` |
+| I-19–I-23 | **no** | Status views, unguarded wrap, CEI, default fees, Complete NatSpec |
+
+**Verdict (eighth):** Prior tagged fixes still hold. WETH English auctions are not competitive once a contract that reverts on ETH receive is highest bidder (**C-13**). Custody has no escape hatch (**M-10** / **M-12**).
+
 ---
 
 ## Critical
@@ -795,9 +815,206 @@ Validated `MarketOrderKind` wiring and the allowance predicate above. Listing + 
 
 ---
 
-## Suggested fix priority (current codebase)
+## Suggested fix priority (seventh)
 
 1. **I-13** — Remove inline BUG/NOTE/TODO comments before production (already acknowledged).  
 2. Optional polish only — no open severity findings requiring code changes.
 
-**Overall:** Marketplace audit items are closed pending acknowledged governance/docs notes and pre-production comment cleanup.
+**Overall (seventh):** Marketplace audit items are closed pending acknowledged governance/docs notes and pre-production comment cleanup.
+
+---
+
+# Eighth sweep (residual WETH auction / custody)
+
+Full re-read of `src/VotingEscrowMarketplace.sol` after seventh-sweep closure. Prior items C-1–C-12, H-1–H-5, M-1–M-9, L-1–L-10, I-1–I-18 were not re-opened.
+
+---
+
+## Critical (eighth sweep)
+
+### C-13: WETH auction outbid refund DoS — reverting `receive()` wins the auction
+
+**Impact:** High  
+**Likelihood:** High  
+**Severity:** Critical  
+**Resolved:** no
+
+`auctionBid` refunds the previous highest bidder before pulling the new bid. For `paymentToken == weth` that refund is `IWETH.withdraw` plus `highestBidder.call`. A bidder contract whose `receive()` / `fallback` reverts makes every later `auctionBid` revert with `EtherTransferFailed`.
+
+`cancelAuction` only allows `AuctionStatus.Pending`. After the grief bid, storage is `Active`, so the seller cannot cancel. After the deadline, `settleAuction` pays the seller (EOA receive succeeds) and `safeTransferFrom` to the attacker. If that contract implements `onERC721Received`, the attacker keeps the veNFT at their bid (often the reserve). The same contract can also outbid an existing EOA first (EOA refund succeeds), then freeze the book.
+
+```664:670:src/VotingEscrowMarketplace.sol
+        if (_status == AuctionStatus.Active) {
+            _transferPaymentOut(_auction.paymentToken, _auction.highestBidder, _auction.highestBid);
+        }
+        _auction.highestBidder = msg.sender;
+        _auction.highestBid = _price;
+        _auction.status = AuctionStatus.Active;
+        _transferPaymentIn(_auction.paymentToken, msg.sender, _price);
+```
+
+**Also appears elsewhere:** `_transferPaymentOut` → `_unwrapEtherFor` (WETH-only). ERC-20 auctions are unaffected: `safeTransfer` does not callback on standard tokens.
+
+---
+
+## Medium (eighth sweep)
+
+### M-10: No recovery for marketplace-held veNFTs
+
+**Impact:** High  
+**Likelihood:** Low  
+**Severity:** Medium  
+**Resolved:** no
+
+`createAuction` escrows the token with `safeTransferFrom`. `settleAuction` (Complete and Expired) and `cancelAuction` send it back the same way. If the winner or seller cannot receive ERC-721, those txs revert forever: status never reaches `Sold` / `Expired`, and there is no skip, `transferFrom` fallback, or gov sweep. `onERC721Received` also accepts any ve transfer, so a direct `safeTransferFrom` into the marketplace has no matching auction and cannot be withdrawn.
+
+Distinct from **C-13**: here the receiver fails the NFT transfer, so they do not profit. Seller still loses custody with no escape hatch.
+
+**Also appears elsewhere:** `_transferToken` on cancel (line 622), expire settle (line 699), and successful settle (line 708).
+
+---
+
+### M-11: Bid increment uses `<=` — true floor is increment + 1 wei
+
+**Impact:** Low  
+**Likelihood:** High  
+**Severity:** Medium  
+**Resolved:** no
+
+The increment gate is `_price <= highestBid + minimumBidIncrement`. With highest 100 and increment 10, 110 reverts and 111 is required. NatSpec describes the smallest increment as the configured step, which is the usual `>= highest + increment` rule. Always on; 1 wei extra.
+
+```658:661:src/VotingEscrowMarketplace.sol
+        else if (_auction.highestBid != 0 && _price <= _auction.highestBid + _auction.minimumBidIncrement) {
+            revert BidIncrementBelowMinimum();
+        }
+```
+
+**Also appears elsewhere:** Only `auctionBid`. First bid still skips increment when `highestBid == 0` (**L-4**).
+
+---
+
+### M-12: Forced WETH unwrap can freeze settlement for contract sellers
+
+**Impact:** High  
+**Likelihood:** Low  
+**Severity:** Medium  
+**Resolved:** no
+
+`_transferPaymentOut` always unwraps WETH and `.call`s the recipient. A seller contract that rejects ETH cannot complete `settleAuction` after a successful bid (`Active` → `Complete`). Same custody freeze as **M-10**, triggered on the payment leg instead of the NFT leg. Listing / offering fulfills fail closed (order remains), so those cases are weaker.
+
+```961:968:src/VotingEscrowMarketplace.sol
+    function _transferPaymentOut(address _paymentToken, address _to, uint256 _amount) internal {
+        address _weth = weth;
+        if (_paymentToken == _weth) {
+            // NOTE: we only transfer unwrapped ether out; no wrapped ether
+            _unwrapEtherFor(_to, _amount);
+        } else {
+            IERC20(_paymentToken).safeTransfer(_to, _amount);
+        }
+```
+
+**Also appears elsewhere:** Fee payout to `gov` on the same path — if the treasury rejects ETH, all WETH settlements fail (see **I-5**).
+
+---
+
+## Low (eighth sweep)
+
+### L-11: `int128` lock amount cast to `uint256` without `>= 0`
+
+**Impact:** Medium  
+**Likelihood:** Low  
+**Severity:** Low  
+**Resolved:** no
+
+`_snapshot` does `uint256(int256(_lockedAmountInt128))`. A negative lock amount becomes `~2^256`, which skips `LockAmountDecreased` (`snapshotAmount > lockedAmountNow` is false when current is huge) and can mis-tier fees. Depends on VotingEscrow never returning a negative amount.
+
+```985:988:src/VotingEscrowMarketplace.sol
+    function _snapshot(uint256 _tokenId) internal view returns (uint256, uint256) {
+        (int128 _lockedAmountInt128, uint256 _lockedEnd) = IVotingEscrow(ve).locked(_tokenId);
+        uint256 _lockedAmount = uint256(int256(_lockedAmountInt128));
+```
+
+**Also appears elsewhere:** Fee tier at swap / auction create uses the same snapshot.
+
+---
+
+### L-12: `_wrapEtherFor` credits the offeror with bare `IERC20.transfer`
+
+**Impact:** Low  
+**Likelihood:** Low  
+**Severity:** Low  
+**Resolved:** no
+
+After `deposit`, WETH is sent with `IERC20.transfer`, not `SafeERC20`. A non-reverting `false` return would leave WETH on the marketplace while still opening the offering. Official WETH9 returns `true` on success; risk is a non-standard `weth` (see **I-5**).
+
+```913:915:src/VotingEscrowMarketplace.sol
+        if (_account != address(this)) {
+            IERC20(_weth).transfer(_account, _amount);
+        }
+```
+
+**Also appears elsewhere:** Only the wrap-to-offeror branch of `createOffering`. Listing / bid wraps keep WETH on `address(this)`.
+
+---
+
+## Informational (eighth sweep)
+
+### I-19: No public computed-status view
+
+**Resolved:** no
+
+`_marketOrderStatus` / `_auctionStatus` are internal. Public mappings keep storage `Open` / `Active` after expiry, KeyGen attach, lock drift, or missing approval. Integrators must recompute.
+
+---
+
+### I-20: `createOffering` wrap path is not `nonReentrant`
+
+**Resolved:** no
+
+`createOffering` is payable and refunds excess ETH via `.call` before `deposit`, but is not `nonReentrant`. No theft path found (excess refund + wrap accounting still nets correctly across reentry). Defense-in-depth only.
+
+---
+
+### I-21: `auctionBid` refunds before updating `highestBidder`
+
+**Resolved:** no
+
+CEI: previous bidder is paid while storage still shows them as highest. Safe for value extraction because `auctionBid` / `settleAuction` / fulfill paths take `nonReentrant`. View-only reentrancy footgun for integrators.
+
+---
+
+### I-22: Fees default to 0%; `configureFees` emits nothing
+
+**Resolved:** no
+
+Unset tier limits are 0, so `calculateFeeTier` always returns `Black` at 0 bps until governance calls `configureFees`. That call has no event (unlike `setMinimumDuration` / `setPaymentTokenValidity`).
+
+---
+
+### I-23: `_auctionStatus` NatSpec vs `Complete` rule
+
+**Resolved:** no
+
+Comment says `Complete` requires `highestPrice != 0`. Code treats stored `Active` past the deadline as `Complete` regardless of bid amount. A 0-reserve, 0-bid auction can still `Complete` and transfer the NFT for free.
+
+---
+
+## Tag checklist (eighth validation)
+
+| Tag | Validated |
+| --- | --------- |
+| C-13 / M-10 / M-11 / M-12 | **no** (new, open) |
+| L-11 / L-12 / I-19–I-23 | **no** (new, open) |
+| All earlier Critical/High/Medium | **yes** or acknowledged |
+| Remaining acknowledged | M-3, I-5, I-6, I-10, I-11, I-13 |
+
+---
+
+## Suggested fix priority (current codebase)
+
+1. **C-13** — Refund / pay WETH as ERC-20 (`safeTransfer`) or use pull payments so a reverting `receive()` cannot block the next bid. Keep native ETH as an opt-in claim.  
+2. **M-10 / M-12** — Seller reclaim or gov sweep after a grace period; do not leave `Complete` auctions one reverting receiver away from a permanent lock.  
+3. **M-11** — Use `>= highest + increment` (or `<` in the revert predicate) so the configured step is the true minimum.  
+4. **I-13** — Remove inline BUG/NOTE/TODO comments before production (already acknowledged).
+
+**Overall:** Eighth sweep reopened actionable work. **C-13** is the priority; **M-10** / **M-12** are custody escape hatches; **M-11** is a 1-wei increment fix. Earlier tagged fixes remain closed.
