@@ -1,0 +1,26 @@
+# 1. Linea
+[linea]
+endpoint_url ="linea-rpc-url"
+
+[linea.string]
+
+[linea.address]
+admin = "0xccc435AaBc481D4Af9da51E51Eb2a383Bce6791F"
+usdc = "0x176211869cA2b568f2A7D4EE941E073a821EE1ff"
+ve = "0x221EC90B3B083A8501A37bdeb7035CeaedF3C31f"
+dao = "0x76FF2CB03175900F1D83328C82D27EA9aeaF2355"
+nodeProperties = "0x902e297ef81a3250f9F20D73b7465ac5d4966241"
+weth = "0xe5D7C2a44FfDDf6b295A15c148167daaAf5Cf34f"
+
+[linea.uint]
+tier1Limit = "1000000"	# locked >= 1m
+tier2Limit = "500000"	# locked >= 500k
+tier3Limit = "200000"	# locked >= 200k
+tier4Limit = "50000"	# locked >= 50k
+tier5Limit = "1"	# locked >= 1
+
+tier1Rate = "200"	# 200 bps == 2%
+tier2Rate = "100"	# 100 bps == 1%
+tier3Rate = "50"	# 50  bps == 0.5%
+tier4Rate = "20"	# 20  bps == 0.2%
+tier5Rate = "10"	# 10  bps == 0.1%
