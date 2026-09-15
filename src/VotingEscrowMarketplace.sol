@@ -8,6 +8,7 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
 
 interface IVotingEscrow {
     function safeTransferFrom(address _from, address _to, uint256 _tokenId) external;
+    function transferFrom(address _from, address _to, uint256 _tokenId) external;
     function approve(address _approved, uint256 _tokenId) external;
     function isApprovedOrOwner(address _spender, uint256 _tokenId) external view returns (bool);
     function ownerOf(uint256 _tokenId) external view returns (address);
@@ -229,7 +230,9 @@ contract VotingEscrowMarketplace is ReentrancyGuard {
         address paymentToken;
         address highestBidder;
         uint256 highestBid;
-        uint256 lockedAmount;
+        // BUG: I-28: Remove redundant locked amount snapshot from auctioned token (locked CTM cannot be removed while
+        // escrowed in this contract
+        // uint256 lockedAmount;
         AuctionStatus status;
     }
 
@@ -628,7 +631,6 @@ contract VotingEscrowMarketplace is ReentrancyGuard {
             _paymentToken,
             address(0),
             0,
-            _lockedAmount,
             AuctionStatus.Pending
         );
         _transferToken(msg.sender, address(this), _tokenId);
@@ -665,6 +667,7 @@ contract VotingEscrowMarketplace is ReentrancyGuard {
      * BUG: M-4: Added reentrancy guard to auctionBid
      * NOTE: M-3: Escrowed tokens cannot be attached to node.
      * NOTE: I-10: Flash stamping not required for auctions AFAIK
+     * NOTE: L-13: Not possible that auction is neither Pending nor Active && ownerOf(_tokenId) != address(this)
      */
     function auctionBid(uint256 _tokenId, address _seller, uint256 _price)
         external
@@ -672,7 +675,6 @@ contract VotingEscrowMarketplace is ReentrancyGuard {
         nonReentrant
         // BUG: I-3: Removed flash stamp for auctionBid
         // flashStampTokenFor(_tokenId, _seller)
-
     {
         uint256 _index = auctionIndexByTokenSeller[_tokenId][_seller];
         Auction storage _auction = auctionsByToken[_tokenId][_index];
@@ -711,6 +713,7 @@ contract VotingEscrowMarketplace is ReentrancyGuard {
      * @param _seller The address of the one who initiated the auction
      * NOTE: M-3: Escrowed tokens cannot be attached to node.
      * BUG: M-4 & M-5: Added reentrancy guard to settleAuction
+     * NOTE: L-13: Not possible that auction is neither Pending nor Active && ownerOf(_tokenId) != address(this)
      */
     function settleAuction(uint256 _tokenId, address _seller)
         external
@@ -735,9 +738,11 @@ contract VotingEscrowMarketplace is ReentrancyGuard {
             // BUG: L-5: Marked Complete auction as Sold
             // BUG: L-6: Marked _status as Sold to ensure correct event AuctionSettled emission
             _auction.status = _status = AuctionStatus.Sold;
+            // BUG: I-28: Fee tier is now based on locked amount at settlement snapshot, not creation snapshot.
+            (uint256 _lockedAmount,) = _snapshot(_tokenId);
             // BUG: C-7: Removed the double-transfer of funds from bidder (see auctionBid)
             (uint256 _fee, uint256 _net) =
-                _deductProtocolFee(_auction.paymentToken, _auction.lockedAmount, _auction.highestBid);
+                _deductProtocolFee(_auction.paymentToken, _lockedAmount, _auction.highestBid);
             _transferPaymentOut(_auction.paymentToken, _auction.seller, _net);
             _transferToken(address(this), _auction.highestBidder, _tokenId);
             emit AuctionSuccessful(_tokenId, _auction.seller, _auction.highestBidder, _auction.highestBid, _fee, _net);
@@ -1028,11 +1033,13 @@ contract VotingEscrowMarketplace is ReentrancyGuard {
     function _transferToken(address _from, address _to, uint256 _tokenId) internal {
         // BUG: M-10: Added verification that sends to DAO in case of recipient malfeasance regarding
         // onERC721Received(). Transfer to the DAO is guaranteed to work.
-        // BUG: M-13: Transfer to treasury is only applied in the case of failed transfer to unknown outgoing address
+        // BUG: M-13/I-27: On token ID transfer revert, transfer to treasury occurs even if the payment went through
+        // (by design).
         (bool success,) =
             ve.call(abi.encodeWithSignature("safeTransferFrom(address,address,uint256)", _from, _to, _tokenId));
         if (!success) {
-            IVotingEscrow(ve).safeTransferFrom(_from, gov, _tokenId);
+            // BUG: M-13: Avoid IERC721Receiver pathway for treasury transfer
+            IVotingEscrow(ve).transferFrom(_from, gov, _tokenId);
             // BUG: I-24: NFT fallback to treasury event implemented
             emit NFTTransferTreasuryFallback(_to, _tokenId);
         }
