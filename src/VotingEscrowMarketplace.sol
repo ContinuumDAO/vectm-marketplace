@@ -63,8 +63,9 @@ contract VotingEscrowMarketplace is ReentrancyGuard {
     error FlashProhibited();
     /// @notice The payment token provided is not supported as a valid medium of exchange in this marketplace.
     error InvalidPaymentToken();
-    /// @notice The low-level call with msg.value failed.
-    error EtherTransferFailed();
+    // BUG: I-26: Removed unused EtherTransferFailed event
+    // /// @notice The low-level call with msg.value failed.
+    // error EtherTransferFailed();
 
     /// @notice The order duration provided is below the minimum allowable order duration.
     error DurationBelowMinimum();
@@ -688,18 +689,17 @@ contract VotingEscrowMarketplace is ReentrancyGuard {
         } else if (_auction.highestBid != 0 && _price < _auction.highestBid + _auction.minimumBidIncrement) {
             revert BidIncrementBelowMinimum();
         }
+        // BUG: C-14: Outbid now refunds the old bidder the old price by storing them to memory before _auction updates
+        address _refundee = _auction.highestBidder;
+        uint256 _refundAmount = _auction.highestBid;
         _auction.highestBidder = msg.sender;
         _auction.highestBid = _price;
         _auction.status = AuctionStatus.Active;
         // BUG: I-21: Move _auction updates before refund for best CEI practices
-        {
-            address _refundee = _auction.highestBidder;
-            uint256 _refundAmount = _auction.highestBid;
-            // BUG: C-4: Previous highest bid is refunded to its bidder
-            // BUG: H-5: The refund payment was moved to auctions that already have a bid
-            if (_status == AuctionStatus.Active) {
-                _transferPaymentOut(_auction.paymentToken, _refundee, _refundAmount);
-            }
+        // BUG: C-4: Previous highest bid is refunded to its bidder
+        // BUG: H-5: The refund payment was moved to auctions that already have a bid
+        if (_status == AuctionStatus.Active) {
+            _transferPaymentOut(_auction.paymentToken, _refundee, _refundAmount);
         }
         _transferPaymentIn(_auction.paymentToken, msg.sender, _price);
         emit AuctionBid(_tokenId, _seller, msg.sender, _price);
@@ -972,6 +972,7 @@ contract VotingEscrowMarketplace is ReentrancyGuard {
             (bool success,) = _account.call{value: _amount}("");
             // BUG: M-12: Added fallback to divert excess funds to treasury in case _account has receive() reversion
             if (!success) {
+                // BUG: I-25: Treasury (gov) does not revert on ETH receival
                 (success,) = gov.call{value: _amount}("");
                 emit ETHTransferTreasuryFallback(_account, _amount);
             }
@@ -1027,9 +1028,14 @@ contract VotingEscrowMarketplace is ReentrancyGuard {
     function _transferToken(address _from, address _to, uint256 _tokenId) internal {
         // BUG: M-10: Added verification that sends to DAO in case of recipient malfeasance regarding
         // onERC721Received(). Transfer to the DAO is guaranteed to work.
+        // BUG: M-13: Transfer to treasury is only applied in the case of failed transfer to unknown outgoing address
         (bool success,) =
             ve.call(abi.encodeWithSignature("safeTransferFrom(address,address,uint256)", _from, _to, _tokenId));
-        if (!success) IVotingEscrow(ve).safeTransferFrom(_from, gov, _tokenId);
+        if (!success) {
+            IVotingEscrow(ve).safeTransferFrom(_from, gov, _tokenId);
+            // BUG: I-24: NFT fallback to treasury event implemented
+            emit NFTTransferTreasuryFallback(_to, _tokenId);
+        }
     }
 
     /**
