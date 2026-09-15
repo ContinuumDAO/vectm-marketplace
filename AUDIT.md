@@ -147,6 +147,16 @@
 
 **Verdict (eleventh):** No new Critical/High/Medium. Paid-swap NFT fallback remains a product choice (**M-13**). Auction fees now use settle-time lock. Remaining items are acknowledged trust/docs notes plus **I-29** comment leftovers.
 
+## Summary (twelfth validation — I-29 comment / snapshot cleanup)
+
+| Finding | Resolved | Notes |
+| ------- | -------- | ----- |
+| I-29 | **yes** | Unused createAuction snapshot removed; L-13 NOTE states Pending/Active ⇒ marketplace owner; I-26 tag says `error` |
+| Prior Critical / High / Medium | still resolved or acknowledged | |
+| New this sweep | **none** | |
+
+**Verdict (twelfth):** All actionable audit findings are resolved or explicitly acknowledged. No new issues found in this pass.
+
 ---
 
 ## Critical
@@ -1230,7 +1240,7 @@ M-13 comment now states the treasury route runs even if payment already succeede
 
 **Resolved:** yes
 
-`Auction.lockedAmount` removed. `settleAuction` calls `_snapshot` and fees from the live lock. `createAuction` still takes an unused snapshot — **I-29**.
+`Auction.lockedAmount` removed. `settleAuction` calls `_snapshot` and fees from the live lock. Create-time snapshot removed (**I-29**).
 
 ---
 
@@ -1268,9 +1278,9 @@ Full re-read of `src/VotingEscrowMarketplace.sol` against `severity-rubric.md`. 
 
 ### I-29: Leftover snapshot and inverted L-13 NOTE
 
-**Resolved:** no
+**Resolved:** yes
 
-`createAuction` still calls `_snapshot` and binds `_lockedAmount` after `Auction.lockedAmount` was removed; the value is unused. `auctionBid` / `settleAuction` NOTE says it is “not possible that auction is neither Pending nor Active && ownerOf != this,” which is the opposite of the intended invariant (Pending/Active ⇒ marketplace is owner). I-26 comment still calls `EtherTransferFailed` an event.
+Create-time `_snapshot` in `createAuction` is removed. Bid/settle NOTE now states: if the auction is Pending or Active, `ownerOf(_tokenId) == address(this)`. I-26 tag says `error`.
 
 ---
 
@@ -1286,9 +1296,35 @@ Full re-read of `src/VotingEscrowMarketplace.sol` against `severity-rubric.md`. 
 
 ---
 
-## Suggested fix priority (current codebase)
+## Suggested fix priority (eleventh)
 
 1. **I-13 / I-29** — Remove unused `createAuction` snapshot; fix the L-13 NOTE; strip inline BUG/NOTE/TODO comments before production (already acknowledged).  
 2. Optional: add `ownerOf == this` on bid/settle anyway (**L-13**), or revert paid swaps if the NFT cannot reach the counterparty (**M-13**) — both accepted as-is.
 
 **Overall (eleventh):** Marketplace audit items are closed pending acknowledged governance/docs/custody notes. No new Critical/High/Medium.
+
+---
+
+# Twelfth sweep (validate I-29 cleanup)
+
+Full re-read of `src/VotingEscrowMarketplace.sol` against `severity-rubric.md`. Prior C-1–C-14 / H-1–H-5 / M-1–M-13 / L-1–L-13 / I-1–I-28 closures re-checked and not re-opened. I-29 closed as above. No new residual findings.
+
+---
+
+## Tag checklist (twelfth validation)
+
+| Tag | Validated |
+| --- | --------- |
+| I-29 | **yes** |
+| All earlier Critical/High/Medium | **yes** or acknowledged |
+| Remaining acknowledged | M-3, M-13, I-5, I-6, I-10, I-11, I-13, L-11, L-13, I-25 |
+
+---
+
+## Suggested fix priority (current codebase)
+
+1. **I-13** — Remove inline BUG/NOTE/TODO comments before production (already acknowledged).  
+2. Optional only — **M-13** / **L-13** remain accepted product/domain choices.
+
+**Overall (twelfth):** Marketplace audit items are closed pending acknowledged governance/docs/custody notes. No open severity findings requiring code changes.
+
