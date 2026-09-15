@@ -135,6 +135,18 @@
 
 **Verdict (tenth):** C-14 is fixed — outbids refund the previous bidder the previous price. No new Critical/High. **M-13** is still open: a paid listing/offering/auction settle still completes if the NFT cannot reach the counterparty (it goes to `gov`).
 
+## Summary (eleventh validation — M-13 / L-13 / I-28 patches)
+
+| Finding | Resolved | Notes |
+| ------- | -------- | ----- |
+| M-13 | **no but acknowledged** | Comment: fallback after payment is by design; gov route now uses `transferFrom` (no receiver hook) |
+| L-13 | **no but acknowledged** | NOTE only; still no `ownerOf == this` on bid/settle |
+| I-27 | **yes** | M-13 comment now matches behavior; I-26 still says “event” |
+| I-28 | **yes** | `lockedAmount` removed from `Auction`; settle fees from live `_snapshot` |
+| New I-29 | **no** | Unused createAuction snapshot; L-13 NOTE wording is inverted |
+
+**Verdict (eleventh):** No new Critical/High/Medium. Paid-swap NFT fallback remains a product choice (**M-13**). Auction fees now use settle-time lock. Remaining items are acknowledged trust/docs notes plus **I-29** comment leftovers.
+
 ---
 
 ## Critical
@@ -1121,17 +1133,11 @@ Correct CEI: snapshot the *previous* `highestBidder` / `highestBid`, then overwr
 **Impact:** High  
 **Likelihood:** Low  
 **Severity:** Medium  
-**Resolved:** no
+**Resolved:** no but acknowledged
 
-The M-13 comment says treasury fallback is “only applied … to unknown outgoing address.” There is no `_to` predicate. Every failed `ve.call(safeTransferFrom(from, to, id))` is retried as `safeTransferFrom(from, gov, id)`.
+Documented as by design. Failed `safeTransferFrom` is retried with `transferFrom` to `gov` (skips `onERC721Received`, so a rejecting treasury contract still takes the token). Paid listing/offering/settle still complete after the NFT goes to the DAO. `createAuction` escrow-to-self still fallbacks the same way if the first call fails.
 
-Callers already moved funds:
-
-- `_executeTokenSwap` pays seller (and fee) *before* the NFT move. A buyer contract that cannot receive ERC-721 still pays; the NFT goes to the DAO.
-- `settleAuction` pays the seller, then delivers to the winner (or `gov`).
-- `createAuction` writes the auction *then* escrows. If transfer-to-self fails (e.g. VE extra receiver checks) but transfer-to-`gov` succeeds, a live auction exists whose NFT is not in marketplace custody. Normal ERC-721 + this `onERC721Received` should succeed to-self; the paid-swap cases are the live risk.
-
-`NFTTransferTreasuryFallback` is now emitted (**I-24**). Atomicity is still gone versus C-11.
+`NFTTransferTreasuryFallback` is emitted (**I-24**). Atomicity versus C-11 is an accepted tradeoff for M-10 liveness.
 
 **Also appears elsewhere:** Shared `_transferToken` (listings, offerings, cancel, settle, create). See **L-13**.
 
@@ -1200,13 +1206,11 @@ Full re-read of `src/VotingEscrowMarketplace.sol` against `severity-rubric.md`. 
 **Impact:** High  
 **Likelihood:** Low  
 **Severity:** Low  
-**Resolved:** no
+**Resolved:** no but acknowledged
 
-`cancelAuction` requires `ownerOf(_tokenId) == address(this)`. `auctionBid` and `settleAuction` do not. `_transferToken` also does not check `ownerOf` after a successful low-level `ve.call` (a non-reverting empty account would look like success).
+NOTE on `auctionBid` / `settleAuction` states lost custody while Pending/Active cannot occur. Still no `ownerOf(_tokenId) == address(this)` check. `_transferToken` still does not assert `ownerOf` after a successful `ve.call`.
 
-If custody is lost while an auction is `Pending`/`Active` (M-13 create-to-gov path, VE admin, mis-set `ve`), bids still escrow. After the deadline, `settleAuction` pays then tries `safeTransferFrom(this, winner)` and `safeTransferFrom(this, gov)`; both fail and the tx reverts, so payment is undone — but the auction never reaches `Sold`/`Expired` and cannot be canceled once `Active`. Bidder funds stay locked.
-
-Normal `createAuction` escrow-to-self should succeed (this contract implements `onERC721Received`). This is a missing invariant, not a standalone grief on a healthy VE.
+If that domain assumption fails (M-13 create-to-gov path, VE admin, mis-set `ve`), bids can still escrow and settle cannot complete once `Active`. Wording of the NOTE is inverted — **I-29**.
 
 **Also appears elsewhere:** Only auction bid/settle. Listing/offering fulfill still require the seller to be current `ownerOf`.
 
@@ -1216,17 +1220,17 @@ Normal `createAuction` escrow-to-self should succeed (this contract implements `
 
 ### I-27: M-13 / I-26 comments do not match the code
 
-**Resolved:** no
+**Resolved:** yes
 
-`_transferToken` says treasury fallback is “only applied in the case of failed transfer to unknown outgoing address.” There is no `_to != address(this)` (or similar) check. The I-26 tag says “Removed unused EtherTransferFailed **event**”; it was an `error`.
+M-13 comment now states the treasury route runs even if payment already succeeded, by design. Residual: I-26 tag still says “event” rather than `error` (**I-13** / **I-29**).
 
 ---
 
 ### I-28: Auction fee uses create-time lock snapshot
 
-**Resolved:** no
+**Resolved:** yes
 
-`createAuction` stores `lockedAmount` from `_snapshot` and `settleAuction` fees from that field, not a fresh lock. If VotingEscrow allows third-party `deposit_for` (or similar) while the marketplace is owner, the winner can receive a larger lock than the fee tier charged. Depends on VE; listings/offerings re-snapshot at fulfill.
+`Auction.lockedAmount` removed. `settleAuction` calls `_snapshot` and fees from the live lock. `createAuction` still takes an unused snapshot — **I-29**.
 
 ---
 
@@ -1243,7 +1247,7 @@ Normal `createAuction` escrow-to-self should succeed (this contract implements `
 
 ---
 
-## Suggested fix priority (current codebase)
+## Suggested fix priority (tenth)
 
 1. **M-13** — Revert paid listing/offering/settle transfers if the counterparty cannot receive the NFT. Use the `gov` fallback only for *custody recovery* (and never on `createAuction` escrow-to-self). Keep emitting `NFTTransferTreasuryFallback`.  
 2. **L-13** — In `auctionBid` / `settleAuction`, require `ownerOf(_tokenId) == address(this)`. Optionally assert `ownerOf` after `_transferToken`.  
@@ -1251,3 +1255,40 @@ Normal `createAuction` escrow-to-self should succeed (this contract implements `
 4. **I-25** — Already acknowledged: treasury must accept ETH.
 
 **Overall (tenth):** Outbid refunds are correct. No new Critical/High. The remaining actionable item is **M-13** (paid swap is not atomic with NFT delivery).
+
+---
+
+# Eleventh sweep (validate M-13 / L-13 / I-28 patches)
+
+Full re-read of `src/VotingEscrowMarketplace.sol` against `severity-rubric.md`. Prior C-1–C-14 / H-1–H-5 / M-1–M-12 closures re-checked and not re-opened.
+
+---
+
+## Informational (eleventh sweep)
+
+### I-29: Leftover snapshot and inverted L-13 NOTE
+
+**Resolved:** no
+
+`createAuction` still calls `_snapshot` and binds `_lockedAmount` after `Auction.lockedAmount` was removed; the value is unused. `auctionBid` / `settleAuction` NOTE says it is “not possible that auction is neither Pending nor Active && ownerOf != this,” which is the opposite of the intended invariant (Pending/Active ⇒ marketplace is owner). I-26 comment still calls `EtherTransferFailed` an event.
+
+---
+
+## Tag checklist (eleventh validation)
+
+| Tag | Validated |
+| --- | --------- |
+| I-28 | **yes** |
+| I-27 | **yes** (M-13 comment); leftover wording **I-29** |
+| M-13 / L-13 | **acknowledged** |
+| New | I-29 |
+| Remaining acknowledged | M-3, M-13, I-5, I-6, I-10, I-11, I-13, L-11, L-13, I-25 |
+
+---
+
+## Suggested fix priority (current codebase)
+
+1. **I-13 / I-29** — Remove unused `createAuction` snapshot; fix the L-13 NOTE; strip inline BUG/NOTE/TODO comments before production (already acknowledged).  
+2. Optional: add `ownerOf == this` on bid/settle anyway (**L-13**), or revert paid swaps if the NFT cannot reach the counterparty (**M-13**) — both accepted as-is.
+
+**Overall (eleventh):** Marketplace audit items are closed pending acknowledged governance/docs/custody notes. No new Critical/High/Medium.
