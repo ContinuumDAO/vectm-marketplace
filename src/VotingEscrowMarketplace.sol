@@ -64,7 +64,7 @@ contract VotingEscrowMarketplace is ReentrancyGuard {
     error FlashProhibited();
     /// @notice The payment token provided is not supported as a valid medium of exchange in this marketplace.
     error InvalidPaymentToken();
-    // BUG: I-26: Removed unused EtherTransferFailed event
+    // BUG: I-26: Removed unused EtherTransferFailed error
     // /// @notice The low-level call with msg.value failed.
     // error EtherTransferFailed();
 
@@ -621,7 +621,8 @@ contract VotingEscrowMarketplace is ReentrancyGuard {
         // BUG: M-1: Moved the '++' increment so that incremented value is returned, disabling index == 0
         uint256 _index = ++nAuctionsByToken[_tokenId];
         auctionIndexByTokenSeller[_tokenId][msg.sender] = _index;
-        (uint256 _lockedAmount,) = _snapshot(_tokenId);
+        // BUG: I-28: Fee tier is now based on locked amount at settlement snapshot, not creation snapshot
+        // (uint256 _lockedAmount,) = _snapshot(_tokenId);
         // BUG: C-1: Changed array to mapping so that no OOB occurs
         auctionsByToken[_tokenId][_index] = Auction(
             _reservePrice,
@@ -667,7 +668,7 @@ contract VotingEscrowMarketplace is ReentrancyGuard {
      * BUG: M-4: Added reentrancy guard to auctionBid
      * NOTE: M-3: Escrowed tokens cannot be attached to node.
      * NOTE: I-10: Flash stamping not required for auctions AFAIK
-     * NOTE: L-13: Not possible that auction is neither Pending nor Active && ownerOf(_tokenId) != address(this)
+     * NOTE: L-13/I-29: If auction is Pending || Active, then ownerOf(_tokenId) == address(this) is true
      */
     function auctionBid(uint256 _tokenId, address _seller, uint256 _price)
         external
@@ -713,7 +714,7 @@ contract VotingEscrowMarketplace is ReentrancyGuard {
      * @param _seller The address of the one who initiated the auction
      * NOTE: M-3: Escrowed tokens cannot be attached to node.
      * BUG: M-4 & M-5: Added reentrancy guard to settleAuction
-     * NOTE: L-13: Not possible that auction is neither Pending nor Active && ownerOf(_tokenId) != address(this)
+     * NOTE: L-13/I-29: If auction is Pending || Active, then ownerOf(_tokenId) == address(this) is true
      */
     function settleAuction(uint256 _tokenId, address _seller)
         external
@@ -738,7 +739,7 @@ contract VotingEscrowMarketplace is ReentrancyGuard {
             // BUG: L-5: Marked Complete auction as Sold
             // BUG: L-6: Marked _status as Sold to ensure correct event AuctionSettled emission
             _auction.status = _status = AuctionStatus.Sold;
-            // BUG: I-28: Fee tier is now based on locked amount at settlement snapshot, not creation snapshot.
+            // BUG: I-28: Fee tier is now based on locked amount at settlement snapshot, not creation snapshot
             (uint256 _lockedAmount,) = _snapshot(_tokenId);
             // BUG: C-7: Removed the double-transfer of funds from bidder (see auctionBid)
             (uint256 _fee, uint256 _net) =
