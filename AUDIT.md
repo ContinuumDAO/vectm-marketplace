@@ -119,6 +119,22 @@
 
 **Verdict (ninth):** Eighth-sweep DoS items are addressed, but the I-21 rewrite **breaks every second bid**. First bid still works; any outbid tries to pay `msg.sender` the new `_price` from existing escrow and reverts (or insolvency if other auctions share the token).
 
+## Summary (tenth validation — C-14 / event / comment patches)
+
+| Finding | Resolved | Notes |
+| ------- | -------- | ----- |
+| C-14 | **yes** | Previous `highestBidder` / `highestBid` snapshotted before overwrite |
+| I-21 | **yes** | CEI now writes bid state, then refunds the snapshot (not the new slots) |
+| I-24 | **yes** | `NFTTransferTreasuryFallback` emitted on treasury NFT route |
+| I-26 | **yes** | `EtherTransferFailed` removed (comment still says “event”) |
+| I-25 | **no but acknowledged** | NOTE: gov is assumed not to reject ETH; second `.call` still unchecked |
+| M-13 | **no** | Comment claims “unknown outgoing only”; code still fallbacks every failed `safeTransferFrom` after payment |
+| New L-13 | **no** | `auctionBid` / `settleAuction` do not assert marketplace custody |
+| New I-27 | **no** | M-13 / I-26 comments do not match the code |
+| New I-28 | **no** | Auction fee uses create-time lock snapshot, not settle-time |
+
+**Verdict (tenth):** C-14 is fixed — outbids refund the previous bidder the previous price. No new Critical/High. **M-13** is still open: a paid listing/offering/auction settle still completes if the NFT cannot reach the counterparty (it goes to `gov`).
+
 ---
 
 ## Critical
@@ -1010,9 +1026,9 @@ After `deposit`, WETH was sent with `IERC20.transfer`, not `SafeERC20`. A non-re
 
 ### I-21: `auctionBid` refunds before updating `highestBidder`
 
-**Resolved:** no
+**Resolved:** yes
 
-The intended CEI rewrite assigns `highestBidder` / `highestBid` first, then reads those slots as the refundee. Refund goes to the *new* bidder for the *new* price. See **C-14**.
+Bid slots are written first, then the *snapshotted* previous bidder is paid (**C-14**). That is the intended CEI order.
 
 ---
 
@@ -1067,9 +1083,11 @@ Checked commit `13f66bd` against every eighth-sweep item. New or residual items 
 **Impact:** High  
 **Likelihood:** High  
 **Severity:** Critical  
-**Resolved:** no
+**Resolved:** yes
 
-Storage is written first, then the refundee is read back from those same slots:
+Previous bidder and amount are copied to memory **before** storage is overwritten, then refunded when `_status == Active`. Isolated auctions and shared-token float both account correctly.
+
+Historical (ninth sweep): storage was written first, then the refundee was read back from those same slots:
 
 ```691:704:src/VotingEscrowMarketplace.sol
         _auction.highestBidder = msg.sender;
@@ -1105,15 +1123,17 @@ Correct CEI: snapshot the *previous* `highestBidder` / `highestBid`, then overwr
 **Severity:** Medium  
 **Resolved:** no
 
-`_transferToken` swallows a failed `safeTransferFrom` to `_to` and sends the veNFT to `gov` instead. Callers already moved funds:
+The M-13 comment says treasury fallback is “only applied … to unknown outgoing address.” There is no `_to` predicate. Every failed `ve.call(safeTransferFrom(from, to, id))` is retried as `safeTransferFrom(from, gov, id)`.
+
+Callers already moved funds:
 
 - `_executeTokenSwap` pays seller (and fee) *before* the NFT move. A buyer contract that cannot receive ERC-721 still pays; the NFT goes to the DAO.
 - `settleAuction` pays the seller, then delivers to the winner (or `gov`).
-- `createAuction` writes the auction *then* escrows. If transfer-to-self fails (e.g. VE extra receiver checks) but transfer-to-`gov` succeeds, a live auction exists whose NFT is not in marketplace custody.
+- `createAuction` writes the auction *then* escrows. If transfer-to-self fails (e.g. VE extra receiver checks) but transfer-to-`gov` succeeds, a live auction exists whose NFT is not in marketplace custody. Normal ERC-721 + this `onERC721Received` should succeed to-self; the paid-swap cases are the live risk.
 
-Previously any NFT failure reverted the whole swap (C-11 atomicity). `NFTTransferTreasuryFallback` is declared but never emitted.
+`NFTTransferTreasuryFallback` is now emitted (**I-24**). Atomicity is still gone versus C-11.
 
-**Also appears elsewhere:** Shared `_transferToken` (listings, offerings, cancel, settle, create).
+**Also appears elsewhere:** Shared `_transferToken` (listings, offerings, cancel, settle, create). See **L-13**.
 
 ---
 
@@ -1121,32 +1141,25 @@ Previously any NFT failure reverted the whole swap (C-11 atomicity). `NFTTransfe
 
 ### I-24: `NFTTransferTreasuryFallback` is never emitted
 
-**Resolved:** no
+**Resolved:** yes
 
-Declared next to `ETHTransferTreasuryFallback`, which *is* emitted. Integrators cannot distinguish intended vs treasury NFT routing.
+Emitted in `_transferToken` when the first `safeTransferFrom` fails and the token is sent to `gov`.
 
 ---
 
 ### I-25: Treasury ETH fallback does not check the second `.call`
 
-**Resolved:** no
+**Resolved:** no but acknowledged
 
-```974:977:src/VotingEscrowMarketplace.sol
-            if (!success) {
-                (success,) = gov.call{value: _amount}("");
-                emit ETHTransferTreasuryFallback(_account, _amount);
-            }
-```
-
-If `gov` also rejects ETH, `success` is ignored, the event still fires, and ETH stays in the marketplace (I-11). Comment on `_transferPaymentOut` says the DAO transfer is guaranteed; it is not enforced. Same pattern in `_wrapEtherFor` excess refund.
+NOTE states the treasury does not revert on ETH receive. The second `.call` is still unchecked; if that assumption fails, `ETHTransferTreasuryFallback` still fires and ETH stays in the marketplace (I-11). Same pattern in `_wrapEtherFor` excess refund.
 
 ---
 
 ### I-26: `EtherTransferFailed` is unused
 
-**Resolved:** no
+**Resolved:** yes
 
-The error remains declared after M-12 / C-13 stopped reverting on failed `.call`.
+Error removed (commented out). Residual: the tag says “event” — **I-27**.
 
 ---
 
@@ -1163,11 +1176,78 @@ The error remains declared after M-12 / C-13 stopped reverting on failed `.call`
 
 ---
 
-## Suggested fix priority (current codebase)
+## Suggested fix priority (ninth)
 
 1. **C-14** — Before overwriting auction bid state, save the previous `highestBidder` and `highestBid`; refund those. Do not read the slots after the write.  
 2. **M-13** — Do not silently complete a paid swap when the NFT cannot reach the counterparty. Revert, or only fallback to `gov` on *auction custody* paths after a grace period — and emit `NFTTransferTreasuryFallback`. Do not use the fallback on `createAuction` escrow-to-self.  
 3. **I-25** — Revert (or keep ETH accounted) if the `gov` ETH fallback fails; do not emit success.  
 4. **I-13** — Remove inline BUG/NOTE/TODO comments before production (already acknowledged).
 
-**Overall:** Eighth-sweep receive/NFT DoS patches work as intended. The I-21 CEI edit is inverted and is a new Critical: **only the first auction bid can succeed**.
+**Overall (ninth):** Eighth-sweep receive/NFT DoS patches work as intended. The I-21 CEI edit is inverted and is a new Critical: **only the first auction bid can succeed**.
+
+---
+
+# Tenth sweep (validate C-14 / event / comment patches)
+
+Full re-read of `src/VotingEscrowMarketplace.sol` against `severity-rubric.md`. Prior C-1–C-13 / H-1–H-5 / M-1–M-12 closures re-checked and not re-opened. C-14, I-21, I-24, I-26 closed as above.
+
+---
+
+## Low (tenth sweep)
+
+### L-13: Auction bid/settle do not assert marketplace custody
+
+**Impact:** High  
+**Likelihood:** Low  
+**Severity:** Low  
+**Resolved:** no
+
+`cancelAuction` requires `ownerOf(_tokenId) == address(this)`. `auctionBid` and `settleAuction` do not. `_transferToken` also does not check `ownerOf` after a successful low-level `ve.call` (a non-reverting empty account would look like success).
+
+If custody is lost while an auction is `Pending`/`Active` (M-13 create-to-gov path, VE admin, mis-set `ve`), bids still escrow. After the deadline, `settleAuction` pays then tries `safeTransferFrom(this, winner)` and `safeTransferFrom(this, gov)`; both fail and the tx reverts, so payment is undone — but the auction never reaches `Sold`/`Expired` and cannot be canceled once `Active`. Bidder funds stay locked.
+
+Normal `createAuction` escrow-to-self should succeed (this contract implements `onERC721Received`). This is a missing invariant, not a standalone grief on a healthy VE.
+
+**Also appears elsewhere:** Only auction bid/settle. Listing/offering fulfill still require the seller to be current `ownerOf`.
+
+---
+
+## Informational (tenth sweep)
+
+### I-27: M-13 / I-26 comments do not match the code
+
+**Resolved:** no
+
+`_transferToken` says treasury fallback is “only applied in the case of failed transfer to unknown outgoing address.” There is no `_to != address(this)` (or similar) check. The I-26 tag says “Removed unused EtherTransferFailed **event**”; it was an `error`.
+
+---
+
+### I-28: Auction fee uses create-time lock snapshot
+
+**Resolved:** no
+
+`createAuction` stores `lockedAmount` from `_snapshot` and `settleAuction` fees from that field, not a fresh lock. If VotingEscrow allows third-party `deposit_for` (or similar) while the marketplace is owner, the winner can receive a larger lock than the fee tier charged. Depends on VE; listings/offerings re-snapshot at fulfill.
+
+---
+
+## Tag checklist (tenth validation)
+
+| Tag | Validated |
+| --- | --------- |
+| C-14 / I-21 | **yes** |
+| I-24 / I-26 | **yes** |
+| I-25 | **acknowledged** |
+| M-13 | **no** (comment-only; paid-swap fallback unchanged) |
+| New | L-13, I-27, I-28 |
+| Remaining acknowledged | M-3, I-5, I-6, I-10, I-11, I-13, L-11, I-25 |
+
+---
+
+## Suggested fix priority (current codebase)
+
+1. **M-13** — Revert paid listing/offering/settle transfers if the counterparty cannot receive the NFT. Use the `gov` fallback only for *custody recovery* (and never on `createAuction` escrow-to-self). Keep emitting `NFTTransferTreasuryFallback`.  
+2. **L-13** — In `auctionBid` / `settleAuction`, require `ownerOf(_tokenId) == address(this)`. Optionally assert `ownerOf` after `_transferToken`.  
+3. **I-13 / I-27** — Remove inline BUG/NOTE/TODO comments before production (already acknowledged).  
+4. **I-25** — Already acknowledged: treasury must accept ETH.
+
+**Overall (tenth):** Outbid refunds are correct. No new Critical/High. The remaining actionable item is **M-13** (paid swap is not atomic with NFT delivery).
