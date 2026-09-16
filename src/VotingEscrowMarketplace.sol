@@ -676,6 +676,7 @@ contract VotingEscrowMarketplace is ReentrancyGuard {
         nonReentrant
         // BUG: I-3: Removed flash stamp for auctionBid
         // flashStampTokenFor(_tokenId, _seller)
+
     {
         uint256 _index = auctionIndexByTokenSeller[_tokenId][_seller];
         Auction storage _auction = auctionsByToken[_tokenId][_index];
@@ -742,8 +743,7 @@ contract VotingEscrowMarketplace is ReentrancyGuard {
             // BUG: I-28: Fee tier is now based on locked amount at settlement snapshot, not creation snapshot
             (uint256 _lockedAmount,) = _snapshot(_tokenId);
             // BUG: C-7: Removed the double-transfer of funds from bidder (see auctionBid)
-            (uint256 _fee, uint256 _net) =
-                _deductProtocolFee(_auction.paymentToken, _lockedAmount, _auction.highestBid);
+            (uint256 _fee, uint256 _net) = _deductProtocolFee(_auction.paymentToken, _lockedAmount, _auction.highestBid);
             _transferPaymentOut(_auction.paymentToken, _auction.seller, _net);
             _transferToken(address(this), _auction.highestBidder, _tokenId);
             emit AuctionSuccessful(_tokenId, _auction.seller, _auction.highestBidder, _auction.highestBid, _fee, _net);
