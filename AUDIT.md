@@ -157,6 +157,23 @@
 
 **Verdict (twelfth):** All actionable audit findings are resolved or explicitly acknowledged. No new issues found in this pass.
 
+## Summary (thirteenth validation — QuillShield `AUDIT_QUILLSHIELD.md` patches)
+
+| Finding | Resolved | Notes |
+| ------- | -------- | ----- |
+| QA-H-001 | **yes** | `fulfillListing` / `fulfillOffering` take `_price` and revert `IncorrectPrice` |
+| QA-H-002 / QA-M-002 | **yes** | `createOffering` (and create/delist/rescind/createAuction) are `nonReentrant`; flash stamp removed |
+| QA-H-003 | **no** | “safeTransfer” low-level call is not an ERC-20 function — see **C-15** |
+| QA-M-001 | **yes** | NatSpec now says failed NFT/ETH/ERC-20 sends go to treasury |
+| QA-L-001 | **no but acknowledged** | NOTE: whitelisted tokens will not overflow `gross * rate` |
+| QA-L-002 | **yes** | `reservePrice == 0` reverts; increment keyed off `highestBidder != 0` |
+| New C-15 | **no** | ERC-20 / offering-WETH payouts call missing `safeTransfer`, then `transfer` to `gov` |
+| New M-14 | **no** | Price commitment is amount-only; same-ask relist in another ERC-20 can still sandwich |
+| New L-14 | **no** | `cancelAuction` still not `nonReentrant` after flash-stamp removal |
+| New I-30 | **no** | Unused `_flashStamp` mapping and `FlashProhibited` error |
+
+**Verdict (thirteenth):** Most QuillShield items are addressed. The QA-H-003 patch **breaks every non-WETH payout** (and WETH `createOffering`) by treating a failed call to a non-existent `safeTransfer` as “bad receiver” and sending tokens to `gov`.
+
 ---
 
 ## Critical
@@ -1321,10 +1338,122 @@ Full re-read of `src/VotingEscrowMarketplace.sol` against `severity-rubric.md`. 
 
 ---
 
-## Suggested fix priority (current codebase)
+## Suggested fix priority (twelfth)
 
 1. **I-13** — Remove inline BUG/NOTE/TODO comments before production (already acknowledged).  
 2. Optional only — **M-13** / **L-13** remain accepted product/domain choices.
 
 **Overall (twelfth):** Marketplace audit items are closed pending acknowledged governance/docs/custody notes. No open severity findings requiring code changes.
+
+---
+
+# Thirteenth sweep (QuillShield patches)
+
+Full re-read of `src/VotingEscrowMarketplace.sol` against `severity-rubric.md` and `AUDIT_QUILLSHIELD.md`. Prior C-1–C-14 / H-1–H-5 / M-1–M-13 closures re-checked and not re-opened except where QA-H-003 regresses payouts.
+
+---
+
+## Critical (thirteenth sweep)
+
+### C-15: QA-H-003 “safeTransfer” failsafe sends ERC-20 (and offering WETH) to `gov`
+
+**Impact:** High  
+**Likelihood:** High  
+**Severity:** Critical  
+**Resolved:** no
+
+`_transferPaymentOut` and `_wrapEtherFor` (offeror branch) do:
+
+```1051:1056:src/VotingEscrowMarketplace.sol
+            (bool success,) = _paymentToken.call(abi.encodeWithSignature("safeTransfer(address,uint256)", _to, _amount));
+            if (!success) {
+                IERC20(_paymentToken).transfer(gov, _amount);
+                emit ERC20TransferTreasuryFallback(_to, _paymentToken, _amount);
+            }
+```
+
+`safeTransfer(address,uint256)` is an OpenZeppelin **library** helper, not an ERC-20 method. Standard tokens only implement `transfer`. The low-level call reverts (or misses), `success` is false, and the tokens are sent to `gov`. The outer function then continues.
+
+- ERC-20 listing/offering: seller is not paid; NFT still moves (M-13-style).  
+- ERC-20 auction outbid: previous bidder is not refunded; funds go to treasury.  
+- ERC-20 settle: seller net goes to treasury; winner still gets the veNFT.  
+- WETH `createOffering`: wrap succeeds, then WETH is sent to `gov` instead of the offeror. The offeror’s ETH is gone; fulfill later fails `transferFrom`.
+
+WETH listing/bid paths that keep WETH on `address(this)` and unwrap via `_unwrapEtherFor` are unaffected.
+
+Correct approach: `IERC20.safeTransfer` (library) to `_to`, and only then a gov fallback — or revert. Do not call `safeTransfer` on the token address.
+
+**Also appears elsewhere:** `_wrapEtherFor` lines 980–984 (same pattern on `weth`).
+
+---
+
+## Medium (thirteenth sweep)
+
+### M-14: Fulfill price commitment does not bind payment token
+
+**Impact:** High  
+**Likelihood:** Low  
+**Severity:** Medium  
+**Resolved:** no
+
+QA-H-001 checks `_listing.price != _price` / `_offering.price != _price` only. A seller (or offeror) can delist/rescind and recreate the same numeric price in a different whitelisted ERC-20 in the same block. A fulfiller who already approved that token (or uses infinite approvals) pays the new asset. WETH ↔ ERC-20 usually reverts on `msg.value`, so the live case is ERC-20 → ERC-20.
+
+**Also appears elsewhere:** `fulfillListing:489` and `fulfillOffering:588`.
+
+---
+
+## Low (thirteenth sweep)
+
+### L-14: `cancelAuction` is not `nonReentrant` after flash-stamp removal
+
+**Impact:** Low  
+**Likelihood:** Low  
+**Severity:** Low  
+**Resolved:** no
+
+QA-H-002 added `nonReentrant` on create/delist/rescind/createAuction because the flash-stamp modifier no longer serializes those paths. `cancelAuction` still transfers an NFT (and may `.call` via other entrypoints the seller can reach) without the guard. No theft path found; defense-in-depth only.
+
+**Also appears elsewhere:** Only `cancelAuction`.
+
+---
+
+## Informational (thirteenth sweep)
+
+### I-30: Flash-stamp storage and error are unused
+
+**Resolved:** no
+
+`flashStampTokenFor` is commented out. `_flashStamp` and `FlashProhibited` remain. Dead ABI / storage residue (I-13).
+
+---
+
+### QA-L-001: Fee `gross * rate` overflow
+
+**Resolved:** no but acknowledged
+
+NOTE: governance will not whitelist tokens whose units can overflow. Solidity 0.8 would revert settle/fulfill rather than wrap. Same class as I-5 / L-11.
+
+---
+
+## Tag checklist (thirteenth validation)
+
+| Tag | Validated |
+| --- | --------- |
+| QA-H-001 / QA-H-002 / QA-M-001 / QA-M-002 / QA-L-002 | **yes** |
+| QA-H-003 | **no** → **C-15** |
+| QA-L-001 | **acknowledged** |
+| New | C-15, M-14, L-14, I-30 |
+| Remaining acknowledged | M-3, M-13, I-5, I-6, I-10, I-11, I-13, L-11, L-13, I-25, QA-L-001 |
+
+---
+
+## Suggested fix priority (current codebase)
+
+1. **C-15** — Pay `_to` with `SafeERC20.safeTransfer` (or `transfer` + return-value check). Use the treasury fallback only if that real transfer fails. Never `call` a `safeTransfer` selector on the token.  
+2. **M-14** — Commit `(paymentToken, price)` on fulfill, or hash both.  
+3. **L-14** — `nonReentrant` on `cancelAuction`.  
+4. **I-13 / I-30** — Remove dead flash-stamp state and inline BUG comments before production.
+
+**Overall (thirteenth):** QuillShield price-commit, reentrancy, reserve, and comment items check out. The ERC-20 failsafe is inverted and is a new Critical: **non-WETH payouts and WETH offerings credit the treasury instead of the user**.
+
 
