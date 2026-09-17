@@ -40,6 +40,8 @@ contract VotingEscrowMarketplace is ReentrancyGuard {
     error OnlySeller();
     /// @notice Only the buyer of the Offering can be supplied.
     error OnlyBuyer();
+    /// @notice The provided price for fulfill Listing/Offering was incorrect or changed before fulfillment.
+    error IncorrectPrice(uint256 _expected, uint256 _actual);
 
     /// @notice Fees provided are invalid: either non-monotonic, equal to zero, or greater than bps denominator
     error InvalidFeeConfiguration();
@@ -71,6 +73,9 @@ contract VotingEscrowMarketplace is ReentrancyGuard {
     /// @notice The order duration provided is below the minimum allowable order duration.
     error DurationBelowMinimum();
 
+    // BUG: QA-L-002: Reserve price cannot be zero because this would allow zero bids initially in the auction
+    /// @notice The reserve price for the auction is zero.
+    error ZeroReservePrice();
     /// @notice The bid made for an auction was less than the reserve price (this can occur when no-one has bid yet).
     error BidBelowReservePrice();
     /// @notice The bid made for an auction was more than the highest & reserve price, but not by the minimum increment.
@@ -167,6 +172,7 @@ contract VotingEscrowMarketplace is ReentrancyGuard {
 
     event NFTTransferTreasuryFallback(address indexed _failedReceiver, uint256 indexed _tokenId);
     event ETHTransferTreasuryFallback(address indexed _failedReceiver, uint256 _amount);
+    event ERC20TransferTreasuryFallback(address indexed _failedReceiver, address indexed _paymentToken, uint256 _amount);
 
     // NOTE: I-14: Replaced grammar as suggested
     /// @notice The Fee tiers used to charge higher fees on larger locks, discouraging shill bidding.
@@ -290,12 +296,13 @@ contract VotingEscrowMarketplace is ReentrancyGuard {
         _;
     }
 
-    /// @notice Modifier to enforce veCTM token and account combination has not interacted in the current block already.
-    modifier flashStampTokenFor(uint256 _tokenId, address _account) {
-        if (_flashStamp[_tokenId][_account] == block.number) revert FlashProhibited();
-        _;
-        _flashStamp[_tokenId][_account] = block.number;
-    }
+    // INFO: QA-H-001: Due to slippage prevention mechanism now in place, flash stamp is redundant
+    // /// @notice Modifier to enforce veCTM token and account combination has not interacted in the current block already.
+    // modifier flashStampTokenFor(uint256 _tokenId, address _account) {
+    //     if (_flashStamp[_tokenId][_account] == block.number) revert FlashProhibited();
+    //     _;
+    //     _flashStamp[_tokenId][_account] = block.number;
+    // }
 
     /// @notice Modifier to enforce that the caller is or is not the owner of the relevant veCTM token.
     modifier ownerStatus(uint256 _tokenId, address _account, bool _expected) {
@@ -409,7 +416,8 @@ contract VotingEscrowMarketplace is ReentrancyGuard {
         ownerStatus(_tokenId, msg.sender, true)
         validPaymentToken(_paymentToken)
         validDuration(_listingDuration)
-        flashStampTokenFor(_tokenId, msg.sender)
+        // BUG: QA-H-002: With removal of flash stamp, non-reentrant modifier required
+        nonReentrant
     {
         (uint256 _lockedAmount, uint256 _lockedEnd) = _snapshot(_tokenId);
         // BUG: H-3: Added delete for existing Open Listing
@@ -441,11 +449,12 @@ contract VotingEscrowMarketplace is ReentrancyGuard {
     /**
      * @notice Delists a token.
      * @param _tokenId The ID of the veCTM token that is currently listed, that should be delisted.
+     * BUG: QA-H-002: With removal of flash stamp, non-reentrant modifier required
      */
     function delist(uint256 _tokenId)
         external
         ownerStatus(_tokenId, msg.sender, true)
-        flashStampTokenFor(_tokenId, msg.sender)
+        nonReentrant
     {
         // BUG: L-8: Added check for Listing state to ensure only Open Listings canceled
         uint256 _index = listingIndexByTokenSeller[_tokenId][msg.sender];
@@ -465,11 +474,10 @@ contract VotingEscrowMarketplace is ReentrancyGuard {
      * undone.
      * BUG: I-7: Replaced instances of 'fulfil' (UK) with 'fulfill' (US)
      */
-    function fulfillListing(uint256 _tokenId, address _seller)
+    function fulfillListing(uint256 _tokenId, address _seller, uint256 _price)
         external
         payable
         ownerStatus(_tokenId, _seller, true)
-        flashStampTokenFor(_tokenId, _seller)
         // BUG: M-4: Added reentrancy guard to fulfillListing
         nonReentrant
     {
@@ -477,6 +485,8 @@ contract VotingEscrowMarketplace is ReentrancyGuard {
         MarketOrder memory _listing = listingsByToken[_tokenId][_index];
         // BUG: M-6: Added check for supplied seller
         if (_listing.creator != _seller) revert OnlySeller();
+        // BUG: QA-H-001: Prevent front-running
+        if (_listing.price != _price) revert IncorrectPrice(_price, _listing.price);
         _deleteListingByTokenSeller(_tokenId, _seller, MarketOrderStatus.Fulfilled);
         (uint256 _lockedAmountNow, uint256 _lockedEndNow) = _snapshot(_tokenId);
         MarketOrderStatus _status = marketOrderStatus(_listing, _lockedAmountNow, _lockedEndNow, msg.sender, _tokenId);
@@ -503,7 +513,8 @@ contract VotingEscrowMarketplace is ReentrancyGuard {
         ownerStatus(_tokenId, msg.sender, false)
         validPaymentToken(_paymentToken)
         validDuration(_offeringDuration)
-        flashStampTokenFor(_tokenId, msg.sender)
+        // BUG: QA-H-002 & QA-M-002: With removal of flash stamp, non-reentrant modifier required
+        nonReentrant
     {
         (uint256 _lockedAmount, uint256 _lockedEnd) = _snapshot(_tokenId);
         // BUG: H-3: Added delete for existing Open Offering
@@ -540,8 +551,9 @@ contract VotingEscrowMarketplace is ReentrancyGuard {
     /**
      * @notice Rescinds an offer for a token.
      * @param _tokenId The ID of the veCTM token that is currently the subject of an offer, that should be rescinded.
+     * BUG: QA-H-002: With removal of flash stamp, non-reentrant modifier required
      */
-    function rescind(uint256 _tokenId) external flashStampTokenFor(_tokenId, msg.sender) {
+    function rescind(uint256 _tokenId) external nonReentrant {
         // BUG: L-8: Added check for Offering state to ensure only Open Offerings canceled
         uint256 _index = offeringIndexByTokenBuyer[_tokenId][msg.sender];
         MarketOrder memory _offering = offeringsByToken[_tokenId][_index];
@@ -561,11 +573,10 @@ contract VotingEscrowMarketplace is ReentrancyGuard {
      * undone.
      * BUG: I-7: Replaced instances of 'fulfil' (UK) with 'fulfill' (US)
      */
-    function fulfillOffering(uint256 _tokenId, address _buyer)
+    function fulfillOffering(uint256 _tokenId, address _buyer, uint256 _price)
         external
         payable
         ownerStatus(_tokenId, msg.sender, true)
-        flashStampTokenFor(_tokenId, _buyer)
         // BUG: M-4: Added reentrancy guard to fulfillOffering
         nonReentrant
     {
@@ -573,6 +584,8 @@ contract VotingEscrowMarketplace is ReentrancyGuard {
         MarketOrder memory _offering = offeringsByToken[_tokenId][_index];
         // BUG: M-6: Added check for supplied buyer
         if (_offering.creator != _buyer) revert OnlyBuyer();
+        // BUG: QA-H-001: Prevent front-running
+        if (_offering.price != _price) revert IncorrectPrice(_price, _offering.price);
         _deleteOfferingByTokenBuyer(_tokenId, _buyer, MarketOrderStatus.Fulfilled);
         (uint256 _lockedAmountNow, uint256 _lockedEndNow) = _snapshot(_tokenId);
         MarketOrderStatus _status =
@@ -603,9 +616,8 @@ contract VotingEscrowMarketplace is ReentrancyGuard {
         ownerStatus(_tokenId, msg.sender, true)
         validPaymentToken(_paymentToken)
         validDuration(_auctionDuration)
-        // BUG: I-3: Removed flash stamp for createAuction
-        // flashStampTokenFor(_tokenId, msg.sender)
-
+        // BUG: QA-H-002: With removal of flash stamp, non-reentrant modifier required
+        nonReentrant
     {
         // BUG: M-7: Added delete for existing Open Listing
         uint256 _existingIndex = listingIndexByTokenSeller[_tokenId][msg.sender];
@@ -615,6 +627,8 @@ contract VotingEscrowMarketplace is ReentrancyGuard {
                 _deleteListingByTokenSeller(_tokenId, msg.sender, MarketOrderStatus.DelistedOrRescinded);
             }
         }
+        // BUG: QA-L-002: Reserve price cannot be zero because this would allow zero bids initially in the auction
+        if (_reservePrice == 0) revert ZeroReservePrice();
         // BUG: M-3: Added check for node attachment in createAuction
         if (INodeProperties(np).attachedKeyGen(_tokenId) != address(0)) revert KeyGenAttached();
         uint256 _deadline = block.timestamp + _auctionDuration;
@@ -674,9 +688,6 @@ contract VotingEscrowMarketplace is ReentrancyGuard {
         external
         payable
         nonReentrant
-        // BUG: I-3: Removed flash stamp for auctionBid
-        // flashStampTokenFor(_tokenId, _seller)
-
     {
         uint256 _index = auctionIndexByTokenSeller[_tokenId][_seller];
         Auction storage _auction = auctionsByToken[_tokenId][_index];
@@ -690,7 +701,9 @@ contract VotingEscrowMarketplace is ReentrancyGuard {
             revert BidBelowReservePrice();
             // BUG: L-4: Added check that the highest bid is non-zero before checking whether minimum bid increment is met
             // BUG: M-11: Modified '<=' to '<' so that highestBid + minimumBidIncrement is enough
-        } else if (_auction.highestBid != 0 && _price < _auction.highestBid + _auction.minimumBidIncrement) {
+            // BUG: QA-L-002: Instead of checking highestBid != 0, check highestBidder != address(0). This is to prevent
+            // repeated 0-price bids
+        } else if (_auction.highestBidder != address(0) && _price < _auction.highestBid + _auction.minimumBidIncrement) {
             revert BidIncrementBelowMinimum();
         }
         // BUG: C-14: Outbid now refunds the old bidder the old price by storing them to memory before _auction updates
@@ -719,8 +732,6 @@ contract VotingEscrowMarketplace is ReentrancyGuard {
      */
     function settleAuction(uint256 _tokenId, address _seller)
         external
-        // BUG: I-3: Removed flash stamp for settleAuction
-        // flashStampTokenFor(_tokenId, _seller)
         nonReentrant
     {
         uint256 _index = auctionIndexByTokenSeller[_tokenId][_seller];
@@ -931,6 +942,8 @@ contract VotingEscrowMarketplace is ReentrancyGuard {
     {
         FeeTier _feeTier = calculateFeeTier(_amount);
         uint256 _feeRate = feeRateByTier[_feeTier];
+        // NOTE: QA-L-001: This will not overflow because validated payment tokens won't use units that could possibly
+        // cause overflow
         _feePayable = _gross * _feeRate / 10_000;
         _netAmount = _gross - _feePayable;
         _transferPaymentOut(_paymentToken, gov, _feePayable);
@@ -940,6 +953,8 @@ contract VotingEscrowMarketplace is ReentrancyGuard {
      * @notice Wraps a given amount of ether for a given account. Uses the official WETH9 contract on Linea.
      * @param _account The account which should receive the wrapped ether
      * @param _amount The amount of ether (from msg.value) to wrap
+     * @dev Transfers that fail due to bad receivers (misimplemented or unimplemented receive() or ERC-777 hooks) are
+     * diverted to treasury.
      */
     function _wrapEtherFor(address _account, uint256 _amount) internal {
         // BUG: I-20: Moved WETH deposit to before refund for best practice
@@ -961,7 +976,12 @@ contract VotingEscrowMarketplace is ReentrancyGuard {
         }
         if (_account != address(this)) {
             // BUG: L-12: Change from transfer to safeTransfer
-            IERC20(_weth).safeTransfer(_account, _amount);
+            // BUG: QA-H-003: Fallback to treasury transfer in case of bad receiver
+            (bool success,) = _weth.call(abi.encodeWithSignature("safeTransfer(address,uint256)", _account, _amount));
+            if (!success) {
+                IERC20(_weth).transfer(gov, _amount);
+                emit ERC20TransferTreasuryFallback(_account, _weth, _amount);
+            }
         }
     }
 
@@ -969,6 +989,8 @@ contract VotingEscrowMarketplace is ReentrancyGuard {
      * @notice Unwraps a given amount of wrapped ether for a given account. Uses the official WETH9 contract on Linea.
      * @param _account The account which should receive the unwrapped ether
      * @param _amount The amount of ether to unwrap
+     * @dev Transfers that fail due to bad receivers (misimplemented or unimplemented receive() hooks) are diverted to
+     * treasury.
      */
     function _unwrapEtherFor(address _account, uint256 _amount) internal {
         address _weth = weth;
@@ -1002,6 +1024,9 @@ contract VotingEscrowMarketplace is ReentrancyGuard {
         } else {
             // BUG: M-2: Added check to prevent accidental ether being transferred in
             if (msg.value > 0) revert InvalidEtherAmount();
+            // BUG: QA-H-003: Fallback to treasury transfer in case of bad receiver not required; let if fail here
+            // as it is not critical to any frozen funds. Assumption: Only tokens that this contract can receive will
+            // be added as payment tokens by gov
             IERC20(_paymentToken).safeTransferFrom(_from, address(this), _amount);
         }
     }
@@ -1012,6 +1037,8 @@ contract VotingEscrowMarketplace is ReentrancyGuard {
      * @param _paymentToken The address of the payment token to transfer to the provided account's balance
      * @param _to The address of the account to credit the amount of payment token
      * @param _amount The amount of payment token to credit the account
+     * @dev Transfers that fail due to bad receivers (misimplemented or unimplemented ERC-777 hooks) are diverted to
+     * treasury.
      */
     function _transferPaymentOut(address _paymentToken, address _to, uint256 _amount) internal {
         address _weth = weth;
@@ -1021,7 +1048,12 @@ contract VotingEscrowMarketplace is ReentrancyGuard {
             // Transfer to the DAO is guaranteed to work.
             _unwrapEtherFor(_to, _amount);
         } else {
-            IERC20(_paymentToken).safeTransfer(_to, _amount);
+            // BUG: QA-H-003: Fallback to treasury transfer in case of bad receiver
+            (bool success,) = _paymentToken.call(abi.encodeWithSignature("safeTransfer(address,uint256)", _to, _amount));
+            if (!success) {
+                IERC20(_paymentToken).transfer(gov, _amount);
+                emit ERC20TransferTreasuryFallback(_to, _paymentToken, _amount);
+            }
         }
     }
 
@@ -1030,6 +1062,8 @@ contract VotingEscrowMarketplace is ReentrancyGuard {
      * @param _from The account to transfer the veCTM from
      * @param _to The account to transfer the veCTM to
      * @param _tokenId The ID of the veCTM to transfer
+     * @dev Transfers that fail due to bad receivers (misimplemented or unimplemented onERC721Received hooks) are
+     * diverted to treasury.
      */
     function _transferToken(address _from, address _to, uint256 _tokenId) internal {
         // BUG: M-10: Added verification that sends to DAO in case of recipient malfeasance regarding
