@@ -25,11 +25,8 @@ jobs:
       - name: Show Forge version
         run: forge --version
 
-      - name: Run Forge fmt
-        run: forge fmt --check
+      - name: Run all helper operations
+        run: ./helpers/all.sh
 
-      - name: Run Forge build
-        run: forge build --via-ir --sizes
-
-      # - name: Run Forge tests
-      #   run: forge test -vvv
+      - name: Run Forge tests
+        run: forge test -vvv
