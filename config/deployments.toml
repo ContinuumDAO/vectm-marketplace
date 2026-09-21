@@ -11,16 +11,19 @@ ve = "0x221EC90B3B083A8501A37bdeb7035CeaedF3C31f"
 dao = "0x76FF2CB03175900F1D83328C82D27EA9aeaF2355"
 nodeProperties = "0x902e297ef81a3250f9F20D73b7465ac5d4966241"
 weth = "0xe5D7C2a44FfDDf6b295A15c148167daaAf5Cf34f"
+vem = "0x8E5843316AcAE67324846E32dd7a97c32F16964B"
+usdcWhale = "0x865B6649E1A4058D669b1B820EAe4b1cCE9d3663"
+veWhale = "0x9925A3CcDa6692F89Dc73EDe8aC9cdF494336699"
 
 [linea.uint]
 minimumDuration = "86400"	# 1 day
 maximumDuration = "2592000"	# 30 days
 
-tier1Limit = "1000000"	# locked >= 1m
-tier2Limit = "500000"	# locked >= 500k
-tier3Limit = "200000"	# locked >= 200k
-tier4Limit = "50000"	# locked >= 50k
-tier5Limit = "1"	# locked >= 1
+tier1Limit = "1000000000000000000000000"	# locked >= 1m
+tier2Limit =  "500000000000000000000000"	# locked >= 500k
+tier3Limit =  "200000000000000000000000"	# locked >= 200k
+tier4Limit =   "50000000000000000000000"	# locked >= 50k
+tier5Limit =       "1000000000000000000"	# locked >= 1
 
 tier1Rate = "100"	# 100 bps == 1%
 tier2Rate = "50"	#  50 bps == 0.5%
@@ -46,11 +49,11 @@ dao = "0xccc435AaBc481D4Af9da51E51Eb2a383Bce6791F"
 minimumDuration = "86400"	# 1 day
 maximumDuration = "2592000"	# 30 days
 
-tier1Limit = "1000000"	# locked >= 1m
-tier2Limit = "500000"	# locked >= 500k
-tier3Limit = "200000"	# locked >= 200k
-tier4Limit = "50000"	# locked >= 50k
-tier5Limit = "1"	# locked >= 1
+tier1Limit = "1000000000000000000000000"	# locked >= 1m
+tier2Limit =  "500000000000000000000000"	# locked >= 500k
+tier3Limit =  "200000000000000000000000"	# locked >= 200k
+tier4Limit =   "50000000000000000000000"	# locked >= 50k
+tier5Limit =       "1000000000000000000"	# locked >= 1
 
 tier1Rate = "100"	# 100 bps == 1%
 tier2Rate = "50"	#  50 bps == 0.5%

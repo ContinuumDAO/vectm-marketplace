@@ -21,6 +21,8 @@ forge-std = "1.16.2"
 [rpc_endpoints]
  linea-rpc-url = "${LINEA_RPC_URL}"
  linea-sepolia-rpc-url = "${LINEA_SEPOLIA_RPC_URL}"
+ linea-fork-rpc-url = "${LINEA_FORK_RPC_URL}"
+ localhost = "http://localhost:8545"
 
 [etherscan]
  linea-key = { url = "https://api.etherscan.io/v2/api?chainid=59144", key = "${ETHERSCAN_API_KEY}" }
